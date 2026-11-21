@@ -7,6 +7,13 @@ tier('user')
 
 const PRESENTATION = { isFullscreen: true, columns: 100 }
 
+// The note a Read inside a REPL script holds in place of its bytes.
+const MOVED_NOTE = (length: number) =>
+  `[${length} base64 chars — image bytes moved to the REPL result, subject to its per-result image cap]`
+
+// The engine's row as drawn alone, marked as the test's own drawing.
+const ENGINE_TOOL_USE = { type: 'Text', children: ['engine ToolUse'], part: { plugin: 'test' } }
+
 const mountRow = (
   $: Engine,
   props: ReturnType<typeof readRow>,
@@ -81,14 +88,51 @@ describe('register', () => {
     engineRow(on)
     const ui = await mountRow($, { ...readRow('text', 'image/png', TINY_PNG), output: { type: 'text', file: { content: 'hi' } } })
 
-    expect(await ui.drawn()).toEqual({ type: 'Text', children: ['engine ToolUse'] })
+    expect(await ui.drawn()).toEqual(ENGINE_TOOL_USE)
   })
 
   test('the desktop draws its own row, untouched', async ($, on) => {
     engineRow(on)
     const ui = await mountRow($, readRow('desk', 'image/png', TINY_PNG), 'desktop')
 
-    expect(await ui.drawn()).toEqual({ type: 'Text', children: ['engine ToolUse'] })
+    expect(await ui.drawn()).toEqual(ENGINE_TOOL_USE)
+  })
+
+  test('a Read inside a REPL script draws the bytes the conversation holds for it', async ($, on) => {
+    engineRow(on)
+    on('session.messages', () => ({
+      value: [
+        {
+          role: 'user' as const,
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'poll',
+              content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: TINY_PNG } }],
+            },
+          ],
+        },
+      ],
+    }))
+
+    const ui = await mountRow($, readRow('inner', 'image/png', MOVED_NOTE(TINY_PNG.length), '/work/shot.png'))
+
+    expect((await ui.find({ type: 'Image' }))?.props).toEqual({
+      source: { png: TINY_PNG },
+      columns: 2,
+      rows: 1,
+      alt: 'shot.png · 16×12',
+    })
+    expect(await ui.find({ type: 'Text', text: /not drawn/ })).toBeUndefined()
+  })
+
+  test('a Read inside a REPL script draws its row alone until the conversation holds its bytes', async ($, on) => {
+    engineRow(on)
+    on('session.messages', () => ({ value: [] }))
+
+    const ui = await mountRow($, readRow('early', 'image/png', MOVED_NOTE(TINY_PNG.length), '/work/shot.png'))
+
+    expect(await ui.drawn()).toEqual(ENGINE_TOOL_USE)
   })
 
   test("a collapsed group draws each Read's picture under its line", async ($, on) => {
@@ -247,7 +291,7 @@ describe('register', () => {
       viewport: VIEWPORT,
     })
 
-    expect(await ui.drawn()).toEqual({ type: 'Text', children: ['engine UserMessage'] })
+    expect(await ui.drawn()).toEqual({ ...ENGINE_TOOL_USE, children: ['engine UserMessage'] })
   })
 
   test('the session registers /images', async ($, on) => {
@@ -272,7 +316,7 @@ describe('register', () => {
 
     const ui = await mountRow($, readRow('off', 'image/png', TINY_PNG))
 
-    expect(await ui.drawn()).toEqual({ type: 'Text', children: ['engine ToolUse'] })
+    expect(await ui.drawn()).toEqual(ENGINE_TOOL_USE)
     expect((await run('')).text).toBe('Pictures are on.')
     expect(await ui.find({ type: 'Image' })).toBeDefined()
   })

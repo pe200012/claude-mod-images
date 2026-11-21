@@ -34,4 +34,16 @@ describe('pictures-of', () => {
     expect(picturesOf(call('mcp__web__fetch', [url]))).toEqual([])
     expect(picturesOf(call('Bash', [{ type: 'image' }]))).toEqual([])
   })
+
+  test("a Read inside a REPL script is a picture whose bytes were moved, by their length", () => {
+    const note = "[8 base64 chars — image bytes moved to the REPL result, subject to its per-result image cap]"
+
+    expect(picturesOf(call('Read', { type: 'image', file: { base64: note, type: 'image/png' } }))).toEqual([
+      { id: 'call#0', base64: '', mediaType: 'image/png', name: 'a.png', moved: 8 },
+    ])
+  })
+
+  test('bytes that are neither base64 nor a note of their move are no picture', () => {
+    expect(picturesOf(call('Read', { type: 'image', file: { base64: '<binary>', type: 'image/png' } }))).toEqual([])
+  })
 })

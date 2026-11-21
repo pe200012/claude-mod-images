@@ -6,6 +6,10 @@ A Claude Mod that draws pictures right in the terminal transcript:
   under the row.
 - **MCP tools.** Image blocks in an MCP tool's result (browser screenshots,
   charts) show under its row.
+- **REPL scripts.** A `Read` or MCP call inside a REPL script keeps only a
+  note where its image was: the bytes go to the REPL's result. The mod finds
+  them in the conversation by the length the note gives and draws them under
+  the call's own row, as for any other.
 - **Pastes.** Images you paste or drag into a prompt show under that prompt.
 
 In a collapsed group (`Read 3 files`, `Called shots`), the pictures sit side
@@ -25,7 +29,7 @@ over a picture.
 
 ## Requirements
 
-- Claude Code with function hooks. Built and tested on 2.1.282. Switch them
+- Claude Code with function hooks. Built on 2.1.282; tested on 2.1.330. Switch them
   on in `~/.claude/settings.json`:
 
   ```json
@@ -88,6 +92,13 @@ Known limits:
   drops a paste from the conversation, its prompt draws no picture.
 - **MCP images by URL** (`source.type: 'url'`) are not fetched. Only base64
   image blocks draw.
+- **A REPL script's pictures are found by their length.** The note a call
+  inside the script keeps says how long the bytes were, and nothing else ties
+  the call to the image the REPL's result delivered. The mod draws the latest
+  image in the conversation of that type and length. Two different images of
+  exactly the same length both show the later one. The picture shows once the
+  result is delivered; one the REPL's image cap left out, or a compaction
+  dropped, draws no picture.
 
 ## How the click works
 
@@ -106,10 +117,12 @@ bun run check     # typecheck, validate the plugin and marketplace, run the test
 bun run vendor    # rebuild hooks/vendor from node_modules
 ```
 
-`types/claude-code/` holds the plugin API types, written by `/plugin-types`
-from Claude Code 2.1.282 (its first line says which). After a Claude Code
-update, run `/plugin-types types/claude-code` in a session here and commit
-the result. CI installs the
+`types/claude-code/claude-code.d.ts` holds the plugin API types (its first
+line names the Claude Code version that wrote them). The engine writes them
+beside a mod it loads from a folder, as
+`.claude-plugin/types/claude-code/index.d.ts` (ignored by git). After a
+Claude Code update, load the plugin from this folder once, copy that file
+over `types/claude-code/claude-code.d.ts` and commit it. CI installs the
 Claude Code version that first line names, so the engine the tests run
 against always matches the types.
 

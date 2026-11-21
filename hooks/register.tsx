@@ -12,6 +12,7 @@ import { drawableOf, type Drawable } from './drawable-of'
 import { IMAGES_COMMAND, isOffAfter } from './images-command'
 import { MAX_HELD_PICTURES, MAX_SOURCE_BYTES } from './limits'
 import { maxRowsOf } from './max-rows-of'
+import { holdsImage, movedBytesOf } from './moved-bytes-of'
 import { PASTED_IMAGE_MARKER, pastedPicturesOf } from './pasted-pictures-of'
 import { type Picture, picturesOf } from './pictures-of'
 import { picturesView, type Shown } from './pictures-view'
@@ -19,14 +20,19 @@ import { roomOf } from './room-of'
 
 const IS_HIDDEN = { plugin: 'images', key: 'isHidden' } as const
 const IS_OFF = { plugin: 'images', key: 'isOff' } as const
+const DELIVERIES = { plugin: 'images', key: 'deliveries' } as const
 
 /**
  * What every drawing of pictures shares for the module's life: the decoded
- * pictures, each prompt's pasted ones, and the `maxRows` option.
+ * pictures, each prompt's pasted ones, the bytes of moved pictures found in
+ * the conversation and, for each not found, the `deliveries` it was sought
+ * at, and the `maxRows` option.
  */
 type Held = {
   drawables: Map<string, Drawable>
   pasted: Map<string, Picture[]>
+  moved: Map<string, string>
+  misses: Map<string, number>
   maxRows: number
 }
 
@@ -42,6 +48,56 @@ const drawableFor = (drawables: Map<string, Drawable>, picture: Picture, maxByte
   }
 
   return drawable
+}
+
+// The pictures with their bytes: a moved one's found in the conversation,
+// or left out while none holds them. Reading `deliveries` while one is
+// missing subscribes the row, so a delivery of images draws it again; the
+// conversation is read once per delivery, not on every draw.
+async function foundOf($: EngineInterface, held: Held, pictures: ReadonlyArray<Picture>): Promise<Picture[]> {
+  const unfound = pictures.filter(picture => picture.moved !== undefined && !held.moved.has(picture.id))
+
+  if (unfound.length > 0) {
+    const deliveries = (await read($, DELIVERIES)) ?? 0
+    const seeking = unfound.filter(picture => held.misses.get(picture.id) !== deliveries)
+
+    if (seeking.length > 0) {
+      const messages = await $.session.messages({ as: 'api' })
+
+      for (const picture of seeking) {
+        const base64 = movedBytesOf(messages, picture)
+
+        if (base64 === null) {
+          held.misses.set(picture.id, deliveries)
+        } else {
+          held.misses.delete(picture.id)
+          held.moved.set(picture.id, base64)
+        }
+      }
+
+      while (held.moved.size > MAX_HELD_PICTURES) {
+        held.moved.delete(held.moved.keys().next().value!)
+      }
+    }
+  }
+
+  return pictures.flatMap(picture => {
+    if (picture.moved === undefined) {
+      return [picture]
+    }
+
+    const base64 = held.moved.get(picture.id)
+
+    return base64 === undefined ? [] : [{ ...picture, base64 }]
+  })
+}
+
+// A row that may hold a moved picture's bytes is kept, or a turn ended:
+// the rows still missing one look again.
+async function delivered($: EngineInterface, held: Held) {
+  if (held.misses.size > 0) {
+    await update($, DELIVERIES, deliveries => (deliveries ?? 0) + 1)
+  }
 }
 
 // Reading `isHidden` while drawing subscribes the row, so a toggle redraws it.
@@ -103,8 +159,14 @@ async function withPictures(
     return drawn
   }
 
+  const found = await foundOf($, held, pictures)
+
+  if (found.length === 0) {
+    return drawn
+  }
+
   const { Box, Button, Client, Text, Image } = $.ui.resolve(e)
-  const shown = await shownOf($, held.drawables, pictures)
+  const shown = await shownOf($, held.drawables, found)
 
   return (
     <Box flexDirection="column">
@@ -119,7 +181,9 @@ async function withPictures(
  * returned images, under a collapsed group's line for each such call, and
  * under a prompt for each image pasted into it; a click on one, or on its
  * caption, hides it, and its caption shows it again. `/images` stops and
- * starts them all for the session.
+ * starts them all for the session. A call made inside a REPL script, whose
+ * bytes went to the REPL's result, draws them once the conversation holds
+ * them.
  *
  * An expanded group draws its calls as `ToolUse` rows, so each picture draws
  * once whichever way its call is shown, hidden or not in both.
@@ -130,7 +194,13 @@ async function withPictures(
 export function register(on: On, options: PluginOptions) {
   // A row draws many times (running, done, each scroll); decode it once per
   // share, the tree's source bytes split evenly across its pictures.
-  const held: Held = { drawables: new Map(), pasted: new Map(), maxRows: maxRowsOf(options.maxRows) }
+  const held: Held = {
+    drawables: new Map(),
+    pasted: new Map(),
+    moved: new Map(),
+    misses: new Map(),
+    maxRows: maxRowsOf(options.maxRows),
+  }
 
   on('session.start', async ($, e, next) => {
     await $.command.register(IMAGES_COMMAND)
@@ -148,6 +218,24 @@ export function register(on: On, options: PluginOptions) {
     await update($, IS_OFF, () => isOff)
 
     return { text: isOff ? 'Pictures are off for this session.' : 'Pictures are on.' }
+  })
+
+  on('session.append', async ($, e, next) => {
+    const kept = await next(e)
+
+    if (holdsImage(e.message.content)) {
+      await delivered($, held)
+    }
+
+    return kept
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+
+    await delivered($, held)
+
+    return result
   })
 
   on('ui.render', { component: 'ToolUse', surface: 'terminal' }, async ($, e, next) =>

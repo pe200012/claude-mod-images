@@ -2,12 +2,53 @@
  * A picture to draw: an id unique in the session (its call's or message's,
  * with its place there), the bytes as the model saw them (Read may re-encode,
  * a PNG read as JPEG), their MIME type and a name to show.
+ *
+ * `moved` is set for a call made inside a REPL script, whose result holds a
+ * note where the bytes were: they went to the REPL's result, and the model
+ * read them there. It is their length in base64, by which they are found in
+ * the conversation; `base64` is empty until then.
  */
 export type Picture = {
   id: string
   base64: string
   mediaType: string
   name: string
+  moved?: number
+}
+
+// The note a call inside a REPL script holds in place of its image's bytes:
+// `[291252 base64 chars — image bytes moved to the REPL result, …]`.
+const MOVED_NOTE = /^\[(\d+) base64 chars\b/
+
+// Base64's alphabet, padding and the whitespace a decoder skips.
+const BASE64_HEAD = /^[A-Za-z0-9+/=\s]*$/
+
+/**
+ * What an image's `data` (or a Read's `file.base64`) holds: the bytes, a
+ * note that they were moved to the REPL's result and how long they are, or
+ * neither.
+ *
+ * @param data the field as stored
+ * @returns `{ base64 }`, `{ moved }`, or null for anything else
+ */
+export const bytesOf = (data: string): { base64: string } | { moved: number } | null => {
+  const note = MOVED_NOTE.exec(data)
+
+  if (note) {
+    return { moved: Number(note[1]) }
+  }
+
+  return BASE64_HEAD.test(data.slice(0, 64)) ? { base64: data } : null
+}
+
+const pictureOf = (data: string, rest: Omit<Picture, 'base64' | 'moved'>): Picture | null => {
+  const bytes = bytesOf(data)
+
+  if (!bytes) {
+    return null
+  }
+
+  return 'moved' in bytes ? { ...rest, base64: '', moved: bytes.moved } : { ...rest, base64: bytes.base64 }
 }
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -34,7 +75,7 @@ export const pictureOfBlock = (block: unknown, id: string, name: string): Pictur
     return null
   }
 
-  return { id, base64: data, mediaType: media_type, name }
+  return pictureOf(data, { id, mediaType: media_type, name })
 }
 
 const readPictureOf = (id: string, input: unknown, output: unknown): Picture[] => {
@@ -49,8 +90,9 @@ const readPictureOf = (id: string, input: unknown, output: unknown): Picture[] =
   }
 
   const path = isRecord(input) && typeof input.file_path === 'string' ? input.file_path : 'image'
+  const picture = pictureOf(base64, { id: `${id}#0`, mediaType: type, name: path.slice(path.lastIndexOf('/') + 1) })
 
-  return [{ id: `${id}#0`, base64, mediaType: type, name: path.slice(path.lastIndexOf('/') + 1) }]
+  return picture ? [picture] : []
 }
 
 const mcpPicturesOf = (id: string, tool: string, output: unknown): Picture[] => {
@@ -68,7 +110,8 @@ const mcpPicturesOf = (id: string, tool: string, output: unknown): Picture[] => 
 
 /**
  * The pictures a finished tool call returned: a Read of an image, or the
- * image blocks of an MCP tool's result, in order.
+ * image blocks of an MCP tool's result, in order. A call made inside a REPL
+ * script gives its pictures `moved`, their bytes to be found.
  *
  * @param call a `ToolUse` row's props or one of a `ToolGroup`'s calls
  * @returns its pictures; none for any other call, a running one, and a group
